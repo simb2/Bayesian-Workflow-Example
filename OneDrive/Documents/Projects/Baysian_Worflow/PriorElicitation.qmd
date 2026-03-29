@@ -1,0 +1,283 @@
+---
+title: "Initial_Modelling_for_priors"
+format: html
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(DHARMa)
+library(glmmTMB)
+library(here)
+library(splines)
+library(MASS)
+library(ggeffects)
+library(car)
+library(dotwhisker)
+library(brms)
+library(kingCoData)
+library(ggmosaic)
+```
+
+## Data Sources
+
+The data were used for this analysis is from a few different sources.
+The first source was
+[kaggle](https://www.kaggle.com/datasets/open-source-sports/professional-hockey-database?select=Master.csv),
+which sites *open source sports* as being the primary source of the
+data. This site was used to gather data on when players played their
+last game, and which team did they spend the majority of their careers.
+The second source for this data set is
+[QuantHockey](https://www.quanthockey.com/). This site was used to
+gather data on the number of Stanley Cup final games played by the top
+1000 players with the most Stanley cup finals games. Finally, data for
+playoff goals per game, playoff assists per game, playoff penalty
+minutes per game, and playoff plus minus per game, was sourced from [NHL
+Official Site](https://www.nhl.com/). This data was used to estimate
+player performance. None of the sites offer a description about any
+intended research to be performed on the data sets they provide.
+
+## Description
+
+-   `sale_id`: The unique transaction identifying code.
+
+-    `pinx`: The unique property identifying code (Major + Minor). Original
+value is preceded by two '..'s to prevent the dropping of leading zeros
+
+-    `sale_date`: Date of sale
+
+-    `sale_price`: Price of the home
+
+-    `sale_nbr`: Count of times this property sold during time period
+
+-     `sale_warning`: Assessor's warning code for this sale
+
+-    `join_status`: Type of data join, see 'explain("join_status") for more details
+
+-    `join_year`: Year of data joined to the sale – based on 'join_status'
+
+-    `longitude`: Longitude
+
+-    `latitude`: Latitude
+
+-    `area`: Assessment area or zone
+
+-    `city`: City
+
+-    `zoning`: Local zoning code
+
+-     `present_use`: Property Use Code
+
+-    `land_val`: Land Tax Value (based on Join Year)
+
+-    `imp_val`: Improved Tax Value (based on Join Year)
+
+-    `year_built`: Year home built
+
+-    `year_reno`: Year major renovation
+
+-    `sqft_lot`: Lot size in square feet
+
+-    `sqft`: Square footage of house
+
+-    `sqft_1`: Square footage of first floor
+
+-     `sqft_fbsmt`: Square footage of finished basement
+
+-    `grade`: Building quality
+
+-    `fbsmt_grade`: Building quality of finished basement
+
+-    `condition`: Home condition
+
+-    `stories`: \# of Stories
+
+-    `beds`: \# of beds
+
+-    `bath_full`: \# of Full Baths
+
+-     `bath_3qtr`: \# of 3/4 Baths
+
+-    `bath_half`: \# of 1/2 Baths
+
+-    `garb_sqft`: Basement garage square feet
+
+-    `gara_sqft`: Attached garage square feetn
+
+-    `wfnt`: Waterfront rating
+
+-    `golf`: On golf course
+
+-    `greenbelt`: On greenbelt
+
+-    `traffic_noies`: Traffic Noise rating
+
+-    `view_rainier`: View of Mt. Raininer
+
+-    `view_olympics`: View of Olympic Mountains
+
+-    `view_cascades`: View of Cascade Mountains
+
+-    `view_territorial`: Territorial View
+
+-    `view_skyline`: View of Seattle Skyline
+
+-    `view_sound`: View of Puget Sound
+
+-    `view_lakewash`: View of Lake Washington
+
+-    `view_lakesamm`: View of Lake Sammammish
+
+-    `view_otherwater`: View of Other Water
+
+-    `view_other`: View of Other
+
+-    `submarket`: 'Area' Field grouped into larger submarkets (subjective)
+
+
+```{r}
+# First, we are going to split the data, and then we are going to combine the view things into a single factor. We should also look at some histograms of the data. 
+
+# Distribution of the catagorical variables
+data(kingco_sales)
+kingco_sales <- kingco_sales %>% dplyr::mutate(
+  year_sold = year(lubridate::ymd(sale_date))
+) 
+kingco_sales2015 <- kingco_sales %>% filter(
+  year_sold <= 2015
+)
+kingco_sales2015 %>% ggplot2::ggplot(aes(x = year_sold)) + 
+  geom_bar(width = 0.5) +
+  theme_minimal() + 
+  scale_x_continuous(breaks = kingco_sales2015$year_sold) + 
+  xlab('Sale Year') + 
+  ylab('Count')
+
+```
+```{r}
+# now looking at area. 
+kingco_sales2015 %>% group_by(area) %>% summarise(
+    count = n()
+  ) %>% pull(count) %>% min()
+kingco_sales2015 %>% ggplot2::ggplot(aes(x = area)) + 
+  geom_bar(width = 0.5) +
+  theme_minimal() + 
+  xlab('Area') + 
+  ylab('Count')
+
+
+```
+
+```{r}
+# I'm gonna also provisionally look at city, and zoning too
+kingco_sales2015 %>% group_by(city) %>% summarise(
+    count = n()
+  ) %>% pull(count) %>% min()
+kingco_sales2015 %>% ggplot2::ggplot(aes(x = city)) + 
+  geom_bar(width = 0.5) +
+  theme_minimal() + 
+  xlab('City') + 
+  ylab('Count') + 
+  theme(axis.text.x = element_text(angle = 45, size = 8, hjust = 1))
+
+```
+
+The potential (random effects) I have in mind are:
+
+sale_date,
+area,
+city,
+zoning,
+
+
+```{r}
+kingco_sales2015 %>% group_by(zoning) %>% summarise(
+    count = n()
+  ) %>% pull(count) %>% min()
+kingco_sales2015 %>% group_by(zoning) %>%filter(n() > 500) %>% ungroup() %>% ggplot2::ggplot(aes(x = zoning)) + 
+  geom_bar(width = 0.5) +
+  theme_minimal() + 
+  xlab('Zone') + 
+  ylab('Count') + 
+  theme(axis.text.x = element_text(angle = 90, size = 7, hjust = 1))
+
+
+```
+
+
+Based on the preliminary analysis, it might be reasonable to include zoning, area, city, and year. Gonna do some follow up plots to see if there is enough 
+
+```{r}
+kingco_sales2015 %>% group_by(zoning) %>% summarise(
+    count = n()
+  ) %>% pull(count) %>% min()
+kingco_sales2015 %>% ggplot2::ggplot(aes(x = zoning)) + 
+  geom_bar(width = 0.5) +
+  theme_minimal() + 
+  xlab('City') + 
+  ylab('Count') + 
+  theme(axis.text.x = element_text(angle = 90, size = 5, hjust = 1))
+
+```
+
+
+```{r}
+options(scipen = 999)
+kingco_sales2015 %>%
+  dplyr::select(starts_with("view_")) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_histogram() +
+  facet_wrap(~ variable)
+kingco_sales2015 = kingco_sales2015 %>% mutate(view = rowSums(across(starts_with("view_"))) > 0)
+
+```
+
+```{r}
+# a little better now
+kingco_sales2015 %>% ggplot(aes(x = view)) +
+  geom_bar()
+
+```
+
+
+```{r}
+# removing view_ stuff
+kingco_sales2015 <- kingco_sales %>% dplyr::select(
+  -starts_with('view_')
+)
+
+# doing the same with baths:
+
+kingco_sales2015 |> 
+  dplyr::select(starts_with('bath_')) |> 
+  pivot_longer(cols = everything(), names_to = 'BathType', values_to = 'bath_count') |> 
+  ggplot(mapping = aes(x = bath_count)) +
+  geom_bar() +
+  facet_wrap(~BathType)
+
+kingco_sales2015 |> 
+  group_by(bath_full) |> 
+  summarise(
+    count = n(),
+    pct = n() / nrow(kingco_sales2015) * 100) |> 
+  ggplot(mapping = aes(x = bath_full, y = pct)) + 
+  geom_line() +
+  geom_point
+kingco_sales2015 |> 
+  group_by(bath_3qtr) |> 
+  summarise(count = n(),
+            pct = n() / nrow(kingco_sales2015) * 100)
+kingco_sales2015 |> 
+  group_by(bath_half) |> 
+  summarise(count = n(),
+            pct = n() / nrow(kingco_sales2015) * 100)
+```
+
+
+
+
