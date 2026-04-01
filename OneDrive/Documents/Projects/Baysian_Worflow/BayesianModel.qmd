@@ -1,0 +1,756 @@
+---
+title: "Initial_Modelling_for_priors"
+format: html
+editor: 
+  markdown: 
+    wrap: 72
+---
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(DHARMa)
+library(glmmTMB)
+library(here)
+library(splines)
+library(MASS)
+library(ggeffects)
+library(car)
+library(dotwhisker)
+library(brms)
+library(kingCoData)
+library(ggmosaic)
+library(GGally)
+library(lme4)
+library(performance)
+library(lubridate)
+```
+
+## Data Sources
+...
+
+
+
+## Preprocessing and Exploration
+```{r}
+
+data(kingco_sales)
+kingco_sales2016 <- kingco_sales |>
+  dplyr::select(-c('pinx', 'sale_id', 'subdivision')) |>
+  mutate(
+    was_renod     = (year_reno > 0),
+    has_bsmnt_gar = (garb_sqft > 0),
+    has_att_gar   = (gara_sqft > 0),
+    has_bsmt      = (sqft_fbsmt > 0),
+    wfnt          = as.factor(wfnt > 0),
+    year_sold     = year(ymd(sale_date))
+  ) |> filter(year_sold > 2015) |> 
+  slice_sample(n = 15000)
+
+kingco_sales2016 <- kingco_sales2016 |> 
+  mutate(
+    sale_warning = na_if(sale_warning, "   ")
+  ) |> 
+  mutate(
+    sale_warning = !is.na(sale_warning)
+  )
+
+kingco_sales <- NULL
+
+```
+
+```{r}
+#| message: false
+
+# Combine view columns into single binary
+kingco_sales2016 |> 
+  dplyr::select(starts_with('view_')) |> 
+  pivot_longer(cols = everything(), values_to = 'View Indicator', names_to = 'View Type') |> 
+  ggplot(mapping = aes(x = `View Indicator`)) + 
+  geom_bar() + 
+  facet_wrap(~ `View Type`)
+
+kingco_sales2016 <- kingco_sales2016 |>
+  mutate(view = rowSums(across(starts_with("view_"))) > 0) |>
+  dplyr::select(-starts_with("view_"))
+
+kingco_sales2016 |> 
+  ggplot(mapping = aes(x = view)) +
+  geom_bar()
+
+# Drop unused join columns
+kingco_sales2016 <- kingco_sales2016 |>
+  dplyr::select(-c(join_year, join_status))
+```
+
+## Changing things to factors
+```{r}
+#| message: false
+
+catagoricals <- c('sale_warning', 'area', 'city', 'zoning', 'golf', 'wfnt', 'greenbelt','present_use', 'noise_traffic', 'view', 'year_sold', 'stories', 'stories', 'was_renod', 'has_bsmnt_gar', 'has_att_gar', 'has_bsmt', 'condition')
+
+
+kingco_sales2016 <- kingco_sales2016 |>
+  mutate(across(all_of(catagoricals), as.factor))
+
+kingco_sales2016 |>
+  dplyr::select(all_of(catagoricals)) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "value") |>
+  ggplot(aes(x = value)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6)) +
+  xlab(NULL) + ylab("Count")
+
+
+```
+
+## Standardize Continuous Predictors
+```{r}
+#| message: false
+
+kingco_sales2016 <- kingco_sales2016 |>
+  mutate(across(where(is.numeric) & !sale_price, ~ as.numeric(scale(.x))))
+```
+
+
+## Prior Predictive Checking 
+
+Suppose we are going to use 2 candidate priors. First, the 'weakly informative' priors given by brms. And the prior we elicited from our previously fitted model. 
+
+
+```{r}
+weak_prior <- c(
+  prior(normal(0, 100), class = b),           # fixed effects (standardized predictors)
+  prior(normal(0, 100), class = Intercept),   # intercept
+  prior(exponential(0.1), class = sd),        # random effect SDs prior
+  prior(exponential(0.1), class = sigma)
+)
+```
+
+
+```{r}
+#| eval: false
+fit1 <- brms::brm(log(sale_price) ~
+  # Structure of the House
+  sqft + sqft_lot + sqft_1 + has_bsmt + sqft_fbsmt +
+  beds + bath_full + bath_3qtr + bath_half +
+  stories +
+  grade + condition + gara_sqft + has_att_gar + garb_sqft + has_bsmnt_gar +
+
+  # Time
+  year_built + was_renod + year_reno +
+
+  # Location features
+  wfnt + golf + greenbelt + view +
+  noise_traffic + longitude + latitude +
+
+  # Transaction
+  sale_warning + sale_nbr +
+
+  # Random effects
+  (1 | city) +
+  (1 | area) +
+  (1 | year_sold),
+
+  data = kingco_sales2016,
+  sample_prior = 'only', # IMPORTANT
+  family = gaussian(),
+  prior = weak_prior,
+  chains = 4,
+  cores = parallel::detectCores(),
+  iter = 2000,
+  warmup = 1000,
+  seed = 123
+)
+```
+
+```{r}
+fit1 <- readRDS("~/Documents/Projects/BayesianWorkflow/prior_check_1.rds")
+pp_check(fit1, prefix = 'ppd')
+```
+
+THESE PRIORS MAKE NO SENSE. Let's use what we learned from our previously fitted data. 
+
+
+```{r}
+#| eval: false
+# # Build prior string for each coefficient
+prior <- c(
+  # Intercept
+  prior(normal(13.07, 1.0), class = Intercept),
+
+  # Structure
+  prior(normal(0.14, 0.2),    class = b, coef = sqft),
+  prior(normal(0.008, 0.1),   class = b, coef = sqft_lot),
+  prior(normal(0.29, 0.2),    class = b, coef = sqft_1),
+  prior(normal(0.02, 0.1),    class = b, coef = has_bsmtTRUE),
+  prior(normal(-0.009, 0.1),  class = b, coef = sqft_fbsmt),
+  prior(normal(-0.07, 0.1),   class = b, coef = beds),
+  prior(normal(0.005, 0.1),   class = b, coef = bath_full),
+  prior(normal(0.003, 0.1),   class = b, coef = bath_3qtr),
+  prior(normal(0.0003, 0.1),  class = b, coef = bath_half),
+  prior(normal(0.046, 0.2),   class = b, coef = stories1.5),
+  prior(normal(0.059, 0.2),   class = b, coef = stories2),
+  prior(normal(0.083, 0.2),   class = b, coef = stories2.5),
+  prior(normal(0.051, 0.3),   class = b, coef = stories3),
+  prior(normal(-0.076, 0.6),  class = b, coef = stories3.5),
+  prior(normal(0.12, 0.1),    class = b, coef = grade),
+  prior(normal(-0.147, 0.2),  class = b, coef = condition2),
+  prior(normal(-0.221, 0.2),  class = b, coef = condition3),
+  prior(normal(-0.230, 0.2),  class = b, coef = condition4),
+  prior(normal(-0.242, 0.2),  class = b, coef = condition5),
+
+  # Garage
+  prior(normal(0.037, 0.1),   class = b, coef = gara_sqft),
+  prior(normal(-0.003, 0.1),  class = b, coef = has_att_garTRUE),
+  prior(normal(-0.008, 0.1),  class = b, coef = garb_sqft),
+  prior(normal(0.041, 0.1),   class = b, coef = has_bsmnt_garTRUE),
+
+  # Time
+  prior(normal(-0.060, 0.1),  class = b, coef = year_built),
+  prior(normal(-2.80, 4.0),   class = b, coef = was_renodTRUE),
+  prior(normal(0.447, 0.6),   class = b, coef = year_reno),
+
+  # Location
+  prior(normal(0.358, 0.4),   class = b, coef = wfntTRUE),
+  prior(normal(0.109, 0.2),   class = b, coef = golf1),
+  prior(normal(0.054, 0.1),   class = b, coef = greenbelt1),
+  prior(normal(0.137, 0.1),   class = b, coef = viewTRUE),
+  prior(normal(-0.026, 0.1),  class = b, coef = noise_traffic1),
+  prior(normal(-0.058, 0.1),  class = b, coef = noise_traffic2),
+  prior(normal(-0.071, 0.1),  class = b, coef = noise_traffic3),
+  prior(normal(-0.056, 0.1),  class = b, coef = longitude),
+  prior(normal(0.071, 0.1),   class = b, coef = latitude),
+
+  # Transaction
+  prior(normal(-0.121, 0.1),  class = b, coef = sale_warningTRUE),
+  prior(normal(0.030, 0.1),   class = b, coef = sale_nbr),
+
+  # Random effect SDs
+  prior(normal(0.20, 0.2),    class = sd, group = area),
+  prior(normal(0.05, 0.1),    class = sd, group = city),
+  prior(normal(0.21, 0.2),    class = sd, group = year_sold),
+
+  # Residual
+  prior(normal(0.22, 0.2),    class = sigma)
+)
+
+
+
+fit2 <- brms::brm(log(sale_price) ~
+  # Structure of the House
+  sqft + sqft_lot + sqft_1 + has_bsmt + sqft_fbsmt +
+  beds + bath_full + bath_3qtr + bath_half +
+  stories +
+  grade + condition + gara_sqft + has_att_gar + garb_sqft + has_bsmnt_gar +
+
+  # Time
+  year_built + was_renod + year_reno +
+
+  # Location features
+  wfnt + golf + greenbelt + view +
+  noise_traffic + longitude + latitude +
+
+  # Transaction
+  sale_warning + sale_nbr +
+
+  # Random effects
+  (1 | city) +
+  (1 | area) +
+  (1 | year_sold),
+
+  data = kingco_sales2016,
+  prior = prior,
+  family = gaussian(),
+  chains = 4,
+  cores = parallel::detectCores(),
+  sample_prior = 'only',
+  iter = 2000,
+  warmup = 1000,
+  seed = 123
+)
+
+# a little too low, increasing the intercept;
+
+```
+
+
+Doing a prior predictive check:
+```{r}
+fit2 <- readRDS("~/Documents/Projects/BayesianWorkflow/prior_check_2.rds")
+pp_check(fit2, prefix = 'ppd')
+
+```
+
+```{r}
+#| eval: false
+# Build prior string for each coefficient
+
+prior <- c(
+  # Intercept
+  prior(normal(15, 1.0), class = Intercept),
+
+  # Structure
+  prior(normal(0.14, 0.2),    class = b, coef = sqft),
+  prior(normal(0.008, 0.1),   class = b, coef = sqft_lot),
+  prior(normal(0.29, 0.2),    class = b, coef = sqft_1),
+  prior(normal(0.02, 0.1),    class = b, coef = has_bsmtTRUE),
+  prior(normal(-0.009, 0.1),  class = b, coef = sqft_fbsmt),
+  prior(normal(-0.07, 0.1),   class = b, coef = beds),
+  prior(normal(0.005, 0.1),   class = b, coef = bath_full),
+  prior(normal(0.003, 0.1),   class = b, coef = bath_3qtr),
+  prior(normal(0.0003, 0.1),  class = b, coef = bath_half),
+  prior(normal(0.046, 0.2),   class = b, coef = stories1.5),
+  prior(normal(0.059, 0.2),   class = b, coef = stories2),
+  prior(normal(0.083, 0.2),   class = b, coef = stories2.5),
+  prior(normal(0.051, 0.3),   class = b, coef = stories3),
+  prior(normal(-0.076, 0.6),  class = b, coef = stories3.5),
+  prior(normal(0.12, 0.1),    class = b, coef = grade),
+  prior(normal(-0.147, 0.2),  class = b, coef = condition2),
+  prior(normal(-0.221, 0.2),  class = b, coef = condition3),
+  prior(normal(-0.230, 0.2),  class = b, coef = condition4),
+  prior(normal(-0.242, 0.2),  class = b, coef = condition5),
+
+  # Garage
+  prior(normal(0.037, 0.1),   class = b, coef = gara_sqft),
+  prior(normal(-0.003, 0.1),  class = b, coef = has_att_garTRUE),
+  prior(normal(-0.008, 0.1),  class = b, coef = garb_sqft),
+  prior(normal(0.041, 0.1),   class = b, coef = has_bsmnt_garTRUE),
+
+  # Time
+  prior(normal(-0.060, 0.1),  class = b, coef = year_built),
+  prior(normal(-2.80, 4.0),   class = b, coef = was_renodTRUE),
+  prior(normal(0.447, 0.6),   class = b, coef = year_reno),
+
+  # Location
+  prior(normal(0.358, 0.4),   class = b, coef = wfntTRUE),
+  prior(normal(0.109, 0.2),   class = b, coef = golf1),
+  prior(normal(0.054, 0.1),   class = b, coef = greenbelt1),
+  prior(normal(0.137, 0.1),   class = b, coef = viewTRUE),
+  prior(normal(-0.026, 0.1),  class = b, coef = noise_traffic1),
+  prior(normal(-0.058, 0.1),  class = b, coef = noise_traffic2),
+  prior(normal(-0.071, 0.1),  class = b, coef = noise_traffic3),
+  prior(normal(-0.056, 0.1),  class = b, coef = longitude),
+  prior(normal(0.071, 0.1),   class = b, coef = latitude),
+
+  # Transaction
+  prior(normal(-0.121, 0.1),  class = b, coef = sale_warningTRUE),
+  prior(normal(0.030, 0.1),   class = b, coef = sale_nbr),
+
+  # Random effect SDs
+  prior(normal(0.20, 0.2),    class = sd, group = area),
+  prior(normal(0.05, 0.1),    class = sd, group = city),
+  prior(normal(0.21, 0.2),    class = sd, group = year_sold),
+
+  # Residual
+  prior(normal(0.22, 0.2),    class = sigma)
+)
+
+
+
+fit3 <- brms::brm(log(sale_price) ~
+  # Structure of the House
+  sqft + sqft_lot + sqft_1 + has_bsmt + sqft_fbsmt +
+  beds + bath_full + bath_3qtr + bath_half +
+  stories +
+  grade + condition + gara_sqft + has_att_gar + garb_sqft + has_bsmnt_gar +
+
+  # Time
+  year_built + was_renod + year_reno +
+
+  # Location features
+  wfnt + golf + greenbelt + view +
+  noise_traffic + longitude + latitude +
+
+  # Transaction
+  sale_warning + sale_nbr +
+
+  # Random effects
+  (1 | city) +
+  (1 | area) +
+  (1 | year_sold),
+
+  data = kingco_sales2016,
+  prior = prior,
+  family = gaussian(),
+  chains = 4,
+  cores = parallel::detectCores(),
+  sample_prior = 'only',
+  iter = 2000,
+  warmup = 1000,
+  seed = 123
+)
+
+
+
+```
+
+Doing a prior preditve check:
+```{r}
+
+fit3 <- readRDS("~/Documents/Projects/BayesianWorkflow/prior_check_3.rds")
+pp_check(fit3, prefix = 'ppd', ndraws = 100)
+
+```
+
+
+Given where we got our prior from, this makes sense. 
+
+## Fitting the model
+
+Try fitting our model:
+```{r}
+#| eval: false
+
+
+# Build prior string for each coefficient
+
+prior <- c(
+  # Intercept
+  prior(normal(15, 1.0), class = Intercept),
+
+  # Structure
+  prior(normal(0.14, 0.2),    class = b, coef = sqft),
+  prior(normal(0.008, 0.1),   class = b, coef = sqft_lot),
+  prior(normal(0.29, 0.2),    class = b, coef = sqft_1),
+  prior(normal(0.02, 0.1),    class = b, coef = has_bsmtTRUE),
+  prior(normal(-0.009, 0.1),  class = b, coef = sqft_fbsmt),
+  prior(normal(-0.07, 0.1),   class = b, coef = beds),
+  prior(normal(0.005, 0.1),   class = b, coef = bath_full),
+  prior(normal(0.003, 0.1),   class = b, coef = bath_3qtr),
+  prior(normal(0.0003, 0.1),  class = b, coef = bath_half),
+  prior(normal(0.046, 0.2),   class = b, coef = stories1.5),
+  prior(normal(0.059, 0.2),   class = b, coef = stories2),
+  prior(normal(0.083, 0.2),   class = b, coef = stories2.5),
+  prior(normal(0.051, 0.3),   class = b, coef = stories3),
+  prior(normal(-0.076, 0.6),  class = b, coef = stories3.5),
+  prior(normal(0.12, 0.1),    class = b, coef = grade),
+  prior(normal(-0.147, 0.2),  class = b, coef = condition2),
+  prior(normal(-0.221, 0.2),  class = b, coef = condition3),
+  prior(normal(-0.230, 0.2),  class = b, coef = condition4),
+  prior(normal(-0.242, 0.2),  class = b, coef = condition5),
+
+  # Garage
+  prior(normal(0.037, 0.1),   class = b, coef = gara_sqft),
+  prior(normal(-0.003, 0.1),  class = b, coef = has_att_garTRUE),
+  prior(normal(-0.008, 0.1),  class = b, coef = garb_sqft),
+  prior(normal(0.041, 0.1),   class = b, coef = has_bsmnt_garTRUE),
+
+  # Time
+  prior(normal(-0.060, 0.1),  class = b, coef = year_built),
+  prior(normal(-2.80, 4.0),   class = b, coef = was_renodTRUE),
+  prior(normal(0.447, 0.6),   class = b, coef = year_reno),
+
+  # Location
+  prior(normal(0.358, 0.4),   class = b, coef = wfntTRUE),
+  prior(normal(0.109, 0.2),   class = b, coef = golf1),
+  prior(normal(0.054, 0.1),   class = b, coef = greenbelt1),
+  prior(normal(0.137, 0.1),   class = b, coef = viewTRUE),
+  prior(normal(-0.026, 0.1),  class = b, coef = noise_traffic1),
+  prior(normal(-0.058, 0.1),  class = b, coef = noise_traffic2),
+  prior(normal(-0.071, 0.1),  class = b, coef = noise_traffic3),
+  prior(normal(-0.056, 0.1),  class = b, coef = longitude),
+  prior(normal(0.071, 0.1),   class = b, coef = latitude),
+
+  # Transaction
+  prior(normal(-0.121, 0.1),  class = b, coef = sale_warningTRUE),
+  prior(normal(0.030, 0.1),   class = b, coef = sale_nbr),
+
+  # Random effect SDs
+  prior(normal(0.20, 0.2),    class = sd, group = area),
+  prior(normal(0.05, 0.1),    class = sd, group = city),
+  prior(normal(0.21, 0.2),    class = sd, group = year_sold),
+
+  # Residual
+  prior(normal(0.22, 0.2),    class = sigma)
+)
+
+
+
+fit3 <- brms::brm(log(sale_price) ~
+  # Structure of the House
+  sqft + sqft_lot + sqft_1 + has_bsmt + sqft_fbsmt +
+  beds + bath_full + bath_3qtr + bath_half +
+  stories +
+  grade + condition + gara_sqft + has_att_gar + garb_sqft + has_bsmnt_gar +
+
+  # Time
+  year_built + was_renod + year_reno +
+
+  # Location features
+  wfnt + golf + greenbelt + view +
+  noise_traffic + longitude + latitude +
+
+  # Transaction
+  sale_warning + sale_nbr +
+
+  # Random effects
+  (1 | city) +
+  (1 | area) +
+  (1 | year_sold),
+
+  data = kingco_sales2016,
+  prior = prior,
+  family = gaussian(),
+  chains = 4,
+  cores = parallel::detectCores(),
+  iter = 2000,
+  warmup = 1000,
+  seed = 123
+)
+
+
+
+
+```
+
+Our model failed to converge (took too long to run.)
+
+Try weaker priors; you should check the prior predictive distribution again:
+
+```{r}
+#| eval: false
+#Build prior string for each coefficient
+
+prior <- c(
+  # Intercept
+ prior(normal(15, 2.0), class = Intercept),
+ # Structure
+ prior(normal(0.14, 2),    class = b, coef = sqft),
+ prior(normal(0.008, 1),   class = b, coef = sqft_lot),
+ prior(normal(0.29, 2),    class = b, coef = sqft_1),
+ prior(normal(0.02, 1),    class = b, coef = has_bsmtTRUE),
+ prior(normal(-0.009, 1),  class = b, coef = sqft_fbsmt),
+ prior(normal(-0.07, 1),   class = b, coef = beds),
+ prior(normal(0.005, 1),   class = b, coef = bath_full),
+ prior(normal(0.003, 1),   class = b, coef = bath_3qtr),
+ prior(normal(0.0003, 1),  class = b, coef = bath_half),
+ prior(normal(0.046, 2),   class = b, coef = stories1.5),
+ prior(normal(0.059, 2),   class = b, coef = stories2),
+ prior(normal(0.083, 2),   class = b, coef = stories2.5),
+ prior(normal(0.051, 3),   class = b, coef = stories3),
+ prior(normal(-0.076, 6),  class = b, coef = stories3.5),
+ prior(normal(0.12, 1),    class = b, coef = grade),
+ prior(normal(-0.147, 2),  class = b, coef = condition2),
+ prior(normal(-0.221, 2),  class = b, coef = condition3),
+ prior(normal(-0.230, 2),  class = b, coef = condition4),
+ prior(normal(-0.242, 2),  class = b, coef = condition5),
+#   # Garage
+ prior(normal(0.037, 1),   class = b, coef = gara_sqft),
+ prior(normal(-0.003, 1),  class = b, coef = has_att_garTRUE),
+ prior(normal(-0.008, 1),  class = b, coef = garb_sqft),
+ prior(normal(0.041, 1),   class = b, coef = has_bsmnt_garTRUE),
+#   # Time
+ prior(normal(-0.060, 1),  class = b, coef = year_built),
+ prior(normal(-2.80, 4.0),   class = b, coef = was_renodTRUE),
+ prior(normal(0.447, 6),   class = b, coef = year_reno),
+#   # Location
+ prior(normal(0.358, 4),   class = b, coef = wfntTRUE),
+ prior(normal(0.109, 2),   class = b, coef = golf1),
+ prior(normal(0.054, 1),   class = b, coef = greenbelt1),
+ prior(normal(0.137, 1),   class = b, coef = viewTRUE),
+ prior(normal(-0.026, 1),  class = b, coef = noise_traffic1),
+ prior(normal(-0.058, 1),  class = b, coef = noise_traffic2),
+ prior(normal(-0.071, 1),  class = b, coef = noise_traffic3),
+ prior(normal(-0.056, 1),  class = b, coef = longitude),
+ prior(normal(0.071, 1),   class = b, coef = latitude),
+#   # Transaction
+ prior(normal(-0.121, 1),  class = b, coef = sale_warningTRUE),
+ prior(normal(0.030, 1),   class = b, coef = sale_nbr),
+#   # Random effect SDs
+ prior(normal(0.20, 2),    class = sd, group = area),
+ prior(normal(0.05, 1),    class = sd, group = city),
+ prior(normal(0.21, 2),    class = sd, group = year_sold),
+#   # Residual
+ prior(normal(0.22, 2),    class = sigma)
+)
+#
+#
+#
+fit4_mcmc <- brms::brm(log(sale_price) ~
+ # Structure of the House
+sqft + sqft_lot + sqft_1 + has_bsmt + sqft_fbsmt +
+beds + bath_full + bath_3qtr + bath_half +
+ stories +
+ grade + condition + gara_sqft + has_att_gar + garb_sqft + has_bsmnt_gar +
+#   # Time
+ year_built + was_renod + year_reno +
+#   # Location features
+ wfnt + golf + greenbelt + view +
+ noise_traffic + longitude + latitude +
+#   # Transaction
+ sale_warning + sale_nbr +
+#   # Random effects
+ (1 | city) +
+ (1 | area) +
+ (1 | year_sold),
+ data = kingco_sales2016,
+ prior = prior,
+ family = gaussian(),
+ seed = 123,
+ sample_prior = 'only', 
+ algorithm = 'sampling'
+)
+
+
+
+```
+I got multple warnings here:
+
+Warning :The largest R-hat is 2.17, indicating chains have not mixed.
+Warning :Bulk Effective Samples Size (ESS) is too low, indicating posterior means and medians may be unreliable.
+Warning :Tail Effective Samples Size (ESS) is too low, indicating posterior variances and tail quantiles may be unreliable.
+
+
+### let's check the Trace plots to assess convergence
+
+```{r}
+fit4_mcmc <- readRDS("~/Documents/Projects/BayesianWorkflow/prior_check_4.rds")
+plot(fit4_mcmc)
+
+```
+
+
+#### Posterior Predictive distribution is also non-sense
+```{r}
+
+pp_check(fit4_mcmc, prefix = 'ppd')
+
+```
+
+
+Let's try using a different algorithm to fit our original model:
+
+```{r}
+#| eval: false
+
+# Build prior string for each coefficient
+
+prior <- c(
+  # Intercept
+  prior(normal(15, 1.0), class = Intercept),
+
+  # Structure
+  prior(normal(0.14, 0.2),    class = b, coef = sqft),
+  prior(normal(0.008, 0.1),   class = b, coef = sqft_lot),
+  prior(normal(0.29, 0.2),    class = b, coef = sqft_1),
+  prior(normal(0.02, 0.1),    class = b, coef = has_bsmtTRUE),
+  prior(normal(-0.009, 0.1),  class = b, coef = sqft_fbsmt),
+  prior(normal(-0.07, 0.1),   class = b, coef = beds),
+  prior(normal(0.005, 0.1),   class = b, coef = bath_full),
+  prior(normal(0.003, 0.1),   class = b, coef = bath_3qtr),
+  prior(normal(0.0003, 0.1),  class = b, coef = bath_half),
+  prior(normal(0.046, 0.2),   class = b, coef = stories1.5),
+  prior(normal(0.059, 0.2),   class = b, coef = stories2),
+  prior(normal(0.083, 0.2),   class = b, coef = stories2.5),
+  prior(normal(0.051, 0.3),   class = b, coef = stories3),
+  prior(normal(-0.076, 0.6),  class = b, coef = stories3.5),
+  prior(normal(0.12, 0.1),    class = b, coef = grade),
+  prior(normal(-0.147, 0.2),  class = b, coef = condition2),
+  prior(normal(-0.221, 0.2),  class = b, coef = condition3),
+  prior(normal(-0.230, 0.2),  class = b, coef = condition4),
+  prior(normal(-0.242, 0.2),  class = b, coef = condition5),
+
+  # Garage
+  prior(normal(0.037, 0.1),   class = b, coef = gara_sqft),
+  prior(normal(-0.003, 0.1),  class = b, coef = has_att_garTRUE),
+  prior(normal(-0.008, 0.1),  class = b, coef = garb_sqft),
+  prior(normal(0.041, 0.1),   class = b, coef = has_bsmnt_garTRUE),
+
+  # Time
+  prior(normal(-0.060, 0.1),  class = b, coef = year_built),
+  prior(normal(-2.80, 4.0),   class = b, coef = was_renodTRUE),
+  prior(normal(0.447, 0.6),   class = b, coef = year_reno),
+
+  # Location
+  prior(normal(0.358, 0.4),   class = b, coef = wfntTRUE),
+  prior(normal(0.109, 0.2),   class = b, coef = golf1),
+  prior(normal(0.054, 0.1),   class = b, coef = greenbelt1),
+  prior(normal(0.137, 0.1),   class = b, coef = viewTRUE),
+  prior(normal(-0.026, 0.1),  class = b, coef = noise_traffic1),
+  prior(normal(-0.058, 0.1),  class = b, coef = noise_traffic2),
+  prior(normal(-0.071, 0.1),  class = b, coef = noise_traffic3),
+  prior(normal(-0.056, 0.1),  class = b, coef = longitude),
+  prior(normal(0.071, 0.1),   class = b, coef = latitude),
+
+  # Transaction
+  prior(normal(-0.121, 0.1),  class = b, coef = sale_warningTRUE),
+  prior(normal(0.030, 0.1),   class = b, coef = sale_nbr),
+
+  # Random effect SDs
+  prior(normal(0.20, 0.2),    class = sd, group = area),
+  prior(normal(0.05, 0.1),    class = sd, group = city),
+  prior(normal(0.21, 0.2),    class = sd, group = year_sold),
+
+  # Residual
+  prior(normal(0.22, 0.2),    class = sigma)
+)
+
+
+
+fit3_vi <- brms::brm(log(sale_price) ~
+  # Structure of the House
+  sqft + sqft_lot + sqft_1 + has_bsmt + sqft_fbsmt +
+  beds + bath_full + bath_3qtr + bath_half +
+  stories +
+  grade + condition + gara_sqft + has_att_gar + garb_sqft + has_bsmnt_gar +
+
+  # Time
+  year_built + was_renod + year_reno +
+
+  # Location features
+  wfnt + golf + greenbelt + view +
+  noise_traffic + longitude + latitude +
+
+  # Transaction
+  sale_warning + sale_nbr +
+
+  # Random effects
+  (1 | city) +
+  (1 | area) +
+  (1 | year_sold),
+
+  data = kingco_sales2016,
+  prior = prior,
+  family = gaussian(),
+  algorithm = 'meanfield', # use variational inference.
+  seed = 123
+)
+
+
+```
+
+
+```{r}
+fit3_vi <- readRDS("~/Documents/Projects/BayesianWorkflow/fit3_vi.rds")
+pp_check(fit3_vi, ndraws = 100)
+
+```
+
+```{r}
+# Plot results
+library(tidybayes)
+
+mcmc_plot(fit3_vi, type = "intervals")   # posterior intervals
+
+```
+
+
+
+
+```{r}
+
+
+fit3_vi %>%
+  gather_draws(b_wfntTRUE, b_grade, b_was_renodTRUE,b_sqft, b_longitude, b_latitude, b_sale_warningTRUE) %>%
+  ggplot(aes(x = .value, y = .variable)) +
+  stat_halfeye() +
+  theme_minimal() + 
+  xlab('Value') + 
+  ylab('Variable')
+
+```
+
+The fact that it was renod
