@@ -167,6 +167,7 @@ fit1 <- brms::brm(log(sale_price) ~
 ```
 
 ```{r}
+set.seed(123)
 fit1 <- readRDS("~/Documents/Projects/BayesianWorkflow/prior_check_1.rds")
 pp_check(fit1, prefix = 'ppd')
 ```
@@ -280,14 +281,21 @@ fit2 <- brms::brm(log(sale_price) ~
 Doing a prior predictive check:
 ```{r}
 fit2 <- readRDS("~/Documents/Projects/BayesianWorkflow/prior_check_2.rds")
-pp_check(fit2, prefix = 'ppd')
+pp_check(fit2, prefix = 'ppd', ndraws = 100)
+
+
+# Generate predictive draws
+set.seed(12)
+ypred <- exp(posterior_predict(fit2, ndraws = 20))
+
+# P(new observation > threshold)
+mean(ypred > 20000)
+mean(ypred < 6000000)
 
 ```
 
 ```{r}
 #| eval: false
-# Build prior string for each coefficient
-
 prior <- c(
   # Intercept
   prior(normal(15, 1.0), class = Intercept),
@@ -383,6 +391,8 @@ fit3 <- brms::brm(log(sale_price) ~
   seed = 123
 )
 
+mean(ypred > 20000)
+mean(ypred < 6000000)
 
 
 ```
@@ -392,6 +402,9 @@ Doing a prior preditve check:
 
 fit3 <- readRDS("~/Documents/Projects/BayesianWorkflow/prior_check_3.rds")
 pp_check(fit3, prefix = 'ppd', ndraws = 100)
+ypred <- exp(posterior_predict(fit3, ndraws = 100))
+mean(ypred > 20000)
+mean(ypred < 6000000)
 
 ```
 
@@ -507,6 +520,7 @@ fit3 <- brms::brm(log(sale_price) ~
 ```
 
 Our model failed to converge (took too long to run.)
+
 
 Try weaker priors; you should check the prior predictive distribution again:
 
@@ -726,8 +740,22 @@ fit3_vi <- brms::brm(log(sale_price) ~
 ```{r}
 fit3_vi <- readRDS("~/Documents/Projects/BayesianWorkflow/fit3_vi.rds")
 pp_check(fit3_vi, ndraws = 100)
+yrep <- exp(posterior_predict(fit3_vi, ndraws = 100))
+
 
 ```
+```{r}
+library(bayesplot)
+
+draws <- posterior_predict(fit3_vi, ndraws = 100)
+
+ppc_dens_overlay(
+    y    = fit3_vi$data$sale_price,      # observed (exponentiated)
+    yrep = exp(draws)                 # posterior predictive (exponentiated)
+)
+
+```
+
 
 ```{r}
 # Plot results
